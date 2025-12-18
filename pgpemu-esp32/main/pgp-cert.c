@@ -12,13 +12,13 @@
 
 void pgp_aes_encrypt(AES_Context *ctx, const uint8_t *inp, uint8_t *out)
 {
-	esp_aes_crypt_ecb(ctx, ESP_AES_ENCRYPT, inp, out);
+	mbedtls_aes_crypt_ecb(ctx, MBEDTLS_AES_ENCRYPT, inp, out);
 }
 
 void aes_setkey(AES_Context *ctx, const uint8_t *key)
 {
-	esp_aes_init( ctx );
-	esp_aes_setkey(ctx, key, 128);
+	mbedtls_aes_init(ctx);
+	mbedtls_aes_setkey_enc(ctx, key, 128);
 }
 
 #else

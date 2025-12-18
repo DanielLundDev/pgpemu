@@ -3,15 +3,16 @@
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
 #include "driver/uart.h"
-#include "esp32/aes.h"
 
 #define EX_UART_NUM UART_NUM_0
 
 
 #include "esp_system.h"
 #include "esp_log.h"
+#include "esp_log_buffer.h"
 #include "nvs_flash.h"
 #include "esp_bt.h"
+#include "esp_mac.h"
 
 #include "esp_gap_ble_api.h"
 #include "esp_gatts_api.h"
@@ -920,7 +921,7 @@ static void uart_event_task(void *pvParameters)
     uint8_t* dtmp = (uint8_t*) malloc(RD_BUF_SIZE);
     for(;;) {
         //Waiting for UART event.
-        if(xQueueReceive(uart0_queue, (void * )&event, (portTickType)portMAX_DELAY)) {
+        if (xQueueReceive(uart0_queue, (void *)&event, portMAX_DELAY)) {
             bzero(dtmp, RD_BUF_SIZE);
             ESP_LOGI(TAG, "uart[%d] event:", EX_UART_NUM);
             switch(event.type) {

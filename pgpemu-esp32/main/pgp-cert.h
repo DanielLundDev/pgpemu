@@ -5,9 +5,12 @@
 
 #ifdef ESP_PLATFORM
 #include "esp_system.h"
-#include "esp32/aes.h"
+#include "esp_random.h"
+#include "esp_log_buffer.h"
+#include "mbedtls/aes.h"
+#define esp_log_buffer_hex(tag, buffer, buff_len) ESP_LOG_BUFFER_HEX((tag), (buffer), (buff_len))
 
-#define AES_Context esp_aes_context
+#define AES_Context mbedtls_aes_context
 #define GEN_RANDOM esp_random
 #else
 #include "aes.h"
