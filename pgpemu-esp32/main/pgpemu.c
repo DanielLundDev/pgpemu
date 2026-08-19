@@ -21,6 +21,7 @@
 #include "pgp-cert.h"
 #include "pgp-display.h"
 #include "pgp-events.h"
+#include "pgp-mood-light.h"
 #include "secrets.h"
 #include "esp_gatt_common_api.h"
 
@@ -630,10 +631,12 @@ void handle_led_notify_from_app(const uint8_t *buffer, size_t length)
 		pgp_led_event_t event = pgp_parse_led_event(buffer, length);
 		if (event == PGP_LED_EVENT_POKEMON_CAUGHT) {
 			pgp_display_pokemon_caught();
+			pgp_mood_light_pokemon_caught();
 		} else if (event == PGP_LED_EVENT_POKEMON_FLED) {
 			pgp_display_pokemon_fled();
 		} else if (event == PGP_LED_EVENT_POKESTOP_SPUN) {
 			pgp_display_pokestop_spun();
+			pgp_mood_light_pokestop_spun();
 		}
 
 		ESP_LOGI(GATTS_TABLE_TAG, "Sending push button");
@@ -1037,6 +1040,9 @@ void app_main()
     if (!pgp_display_init()) {
 	    ESP_LOGE(GATTS_TABLE_TAG, "Failed to start display task");
     }
+	if (!pgp_mood_light_init()) {
+		ESP_LOGE(GATTS_TABLE_TAG, "Failed to start mood light task");
+	}
 
     /* Configure parameters of an UART driver,
      * communication pins and install the driver */
