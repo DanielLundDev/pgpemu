@@ -19,6 +19,8 @@
 #include "esp_bt_main.h"
 #include "pgpemu.h"
 #include "pgp-cert.h"
+#include "pgp-display.h"
+#include "pgp-events.h"
 #include "secrets.h"
 #include "esp_gatt_common_api.h"
 
@@ -598,10 +600,20 @@ void handle_protocol(esp_gatt_if_t gatts_if,
     }
 }
 
-void handle_led_notify_from_app(const uint8_t *buffer)
+void handle_led_notify_from_app(const uint8_t *buffer, size_t length)
 {
+		if (buffer == NULL || length < 4) {
+			ESP_LOGW(GATTS_TABLE_TAG, "Ignoring truncated LED pattern");
+			return;
+		}
+
 		int number_of_patterns = buffer[3] & 0x1f;
 		int priority = (buffer[3] >> 5) & 0x7;
+		if ((size_t)number_of_patterns > (length - 4) / 3) {
+			ESP_LOGW(GATTS_TABLE_TAG, "Ignoring malformed LED pattern count=%d len=%u",
+				 number_of_patterns, (unsigned)length);
+			return;
+		}
 
 		ESP_LOGI(GATTS_TABLE_TAG, "LED: Pattern Count=%d priority: %d", number_of_patterns, priority);
 		//1 pattern = 3 bytes
@@ -614,6 +626,16 @@ void handle_led_notify_from_app(const uint8_t *buffer)
 			uint8_t blue = pat[2] & 0xf;
 			ESP_LOGI(GATTS_TABLE_TAG, "*(%d) #%02x%02x%02x", duration, red, green, blue);
 		}
+
+		pgp_led_event_t event = pgp_parse_led_event(buffer, length);
+		if (event == PGP_LED_EVENT_POKEMON_CAUGHT) {
+			pgp_display_pokemon_caught();
+		} else if (event == PGP_LED_EVENT_POKEMON_FLED) {
+			pgp_display_pokemon_fled();
+		} else if (event == PGP_LED_EVENT_POKESTOP_SPUN) {
+			pgp_display_pokestop_spun();
+		}
+
 		ESP_LOGI(GATTS_TABLE_TAG, "Sending push button");
 		xQueueSend(button_queue, &number_of_patterns, portMAX_DELAY);
 
@@ -635,7 +657,8 @@ void pgp_exec_write_event_env(esp_gatt_if_t gatts_if, prepare_type_env_t *prepar
 
 
 	} else if (led_button_handle_table[IDX_CHAR_LED_VAL] == prepare_write_env->handle) {
-            handle_led_notify_from_app(prepare_write_env->prepare_buf);
+            handle_led_notify_from_app(prepare_write_env->prepare_buf,
+				       prepare_write_env->prepare_len);
 
 	}
 
@@ -744,7 +767,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
 		                    param->write.len,
 		                    param->write.conn_id);
 			} else if (led_button_handle_table[IDX_CHAR_LED_VAL] == param->write.handle) {
-				handle_led_notify_from_app(param->write.value);
+				handle_led_notify_from_app(param->write.value, param->write.len);
 				return;
 			} else {
 				ESP_LOGE(GATTS_TABLE_TAG, "unhandled data: handle: %d", param->write.handle);
@@ -791,14 +814,16 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             conn_params.timeout = 400;    // timeout = 400*10ms = 4000ms
             //start sent the update connection parameters to the peer device.
             esp_ble_gap_update_conn_params(&conn_params);
-	    last_conn_id = param->write.conn_id;
+	    last_conn_id = param->connect.conn_id;
 	    last_if = gatts_if;
+	    pgp_display_set_connected(true);
 	    
             esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
             break;
         case ESP_GATTS_DISCONNECT_EVT:
             ESP_LOGI(GATTS_TABLE_TAG, "ESP_GATTS_DISCONNECT_EVT, reason = %d", param->disconnect.reason);
 	    cert_state = 0;
+	    pgp_display_set_connected(false);
 
             esp_ble_gap_start_advertising(&adv_params);
             break;
@@ -1009,6 +1034,9 @@ void app_main()
     }
     ESP_ERROR_CHECK( ret );
 
+    if (!pgp_display_init()) {
+	    ESP_LOGE(GATTS_TABLE_TAG, "Failed to start display task");
+    }
 
     /* Configure parameters of an UART driver,
      * communication pins and install the driver */
@@ -1036,7 +1064,9 @@ void app_main()
 
     xTaskCreate(auto_button_task, "auto_button_task", 2048, NULL, 12, NULL);
 
+#if CONFIG_BT_CLASSIC_ENABLED
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+#endif
 
     memcpy(bt_mac, MAC, 6);
     memcpy(mac, MAC, 6);
