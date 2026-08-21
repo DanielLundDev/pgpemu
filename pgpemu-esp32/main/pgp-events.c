@@ -49,6 +49,9 @@ pgp_led_event_t pgp_parse_led_event(const uint8_t *buffer, size_t length)
 	if ((count_green == count_notoff || count_yellow == count_notoff) && count_notoff > 0) {
 		return PGP_LED_EVENT_POKEMON_ENCOUNTER;
 	}
+	if (count_blue == count_notoff && count_notoff > 0) {
+		return PGP_LED_EVENT_POKESTOP_ENCOUNTER;
+	}
 	if (count_ballshake && count_blue && count_green) {
 		return PGP_LED_EVENT_POKEMON_CAUGHT;
 	}

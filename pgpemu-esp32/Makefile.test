@@ -1,3 +1,12 @@
-cert-test: main/aes.c main/pgp-cert.c main/cert-test.c main/secrets.c 
-	   gcc -Wall -Imain main/aes.c main/pgp-cert.c main/cert-test.c main/secrets.c -o cert-test
-	   
+all: cert-test events-test
+
+cert-test: main/aes.c main/pgp-cert.c main/cert-test.c main/secrets.c
+	gcc -Wall -Imain main/aes.c main/pgp-cert.c main/cert-test.c main/secrets.c -o cert-test
+
+events-test: main/pgp-events.c main/pgp-events-test.c
+	gcc -Wall -Wextra -Imain main/pgp-events.c main/pgp-events-test.c -o events-test
+
+clean:
+	rm -f cert-test events-test
+
+.PHONY: all clean

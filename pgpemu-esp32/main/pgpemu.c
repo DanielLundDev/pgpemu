@@ -4,6 +4,8 @@
 #include "freertos/queue.h"
 #include "driver/uart.h"
 
+#include <inttypes.h>
+
 #define EX_UART_NUM UART_NUM_0
 
 
@@ -79,6 +81,12 @@ typedef struct {
     uint8_t                 *prepare_buf;
     int                     prepare_len;
 } prepare_type_env_t;
+
+typedef struct {
+	esp_gatt_if_t gatts_if;
+	uint16_t conn_id;
+	uint32_t delay_ms;
+} button_queue_item_t;
 
 static QueueHandle_t button_queue;
 
@@ -601,7 +609,8 @@ void handle_protocol(esp_gatt_if_t gatts_if,
     }
 }
 
-void handle_led_notify_from_app(const uint8_t *buffer, size_t length)
+void handle_led_notify_from_app(esp_gatt_if_t gatts_if, uint16_t conn_id,
+				const uint8_t *buffer, size_t length)
 {
 		if (buffer == NULL || length < 4) {
 			ESP_LOGW(GATTS_TABLE_TAG, "Ignoring truncated LED pattern");
@@ -629,7 +638,19 @@ void handle_led_notify_from_app(const uint8_t *buffer, size_t length)
 		}
 
 		pgp_led_event_t event = pgp_parse_led_event(buffer, length);
-		if (event == PGP_LED_EVENT_POKEMON_CAUGHT) {
+		if (event == PGP_LED_EVENT_POKEMON_ENCOUNTER ||
+		    event == PGP_LED_EVENT_POKESTOP_ENCOUNTER) {
+			button_queue_item_t item = {
+				.gatts_if = gatts_if,
+				.conn_id = conn_id,
+				.delay_ms = 1000 + esp_random() % 1501,
+			};
+			ESP_LOGI(GATTS_TABLE_TAG, "Queueing auto button in %" PRIu32 " ms",
+				 item.delay_ms);
+			if (xQueueSend(button_queue, &item, 0) != pdTRUE) {
+				ESP_LOGW(GATTS_TABLE_TAG, "Auto button queue full");
+			}
+		} else if (event == PGP_LED_EVENT_POKEMON_CAUGHT) {
 			pgp_display_pokemon_caught();
 			pgp_mood_light_pokemon_caught();
 		} else if (event == PGP_LED_EVENT_POKEMON_FLED) {
@@ -638,10 +659,6 @@ void handle_led_notify_from_app(const uint8_t *buffer, size_t length)
 			pgp_display_pokestop_spun();
 			pgp_mood_light_pokestop_spun();
 		}
-
-		ESP_LOGI(GATTS_TABLE_TAG, "Sending push button");
-		xQueueSend(button_queue, &number_of_patterns, portMAX_DELAY);
-
 }
 
 void pgp_exec_write_event_env(esp_gatt_if_t gatts_if, prepare_type_env_t *prepare_write_env, esp_ble_gatts_cb_param_t *param){
@@ -660,7 +677,8 @@ void pgp_exec_write_event_env(esp_gatt_if_t gatts_if, prepare_type_env_t *prepar
 
 
 	} else if (led_button_handle_table[IDX_CHAR_LED_VAL] == prepare_write_env->handle) {
-            handle_led_notify_from_app(prepare_write_env->prepare_buf,
+	            handle_led_notify_from_app(gatts_if, param->exec_write.conn_id,
+				       prepare_write_env->prepare_buf,
 				       prepare_write_env->prepare_len);
 
 	}
@@ -770,7 +788,8 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
 		                    param->write.len,
 		                    param->write.conn_id);
 			} else if (led_button_handle_table[IDX_CHAR_LED_VAL] == param->write.handle) {
-				handle_led_notify_from_app(param->write.value, param->write.len);
+				handle_led_notify_from_app(gatts_if, param->write.conn_id,
+						   param->write.value, param->write.len);
 				return;
 			} else {
 				ESP_LOGE(GATTS_TABLE_TAG, "unhandled data: handle: %d", param->write.handle);
@@ -920,17 +939,36 @@ static void auto_button_task(void *pvParameters)
 {
         ESP_LOGI("BUTTON", "[button task start]");
 	while (1) {
-		int element;
-		if (xQueueReceive(button_queue, &element, portMAX_DELAY)) {
-			    ESP_LOGI("BUTTON", "[auto push button]");
-			    uint8_t notify_data[2];
-                            notify_data[0] = 0x03;
-                            notify_data[1] = 0xff;
+		button_queue_item_t item;
+		if (xQueueReceive(button_queue, &item, portMAX_DELAY)) {
+			int press_start = esp_random() % 6;
+			int press_last = press_start + 4 + esp_random() % (10 - press_start - 4);
+			uint16_t button_pattern = 0;
+			for (int sample = 0; sample < 10; sample++) {
+				button_pattern <<= 1;
+				if (sample >= press_start && sample <= press_last) {
+					button_pattern |= 1;
+				}
+			}
+			button_pattern &= 0x03ff;
+			uint8_t notify_data[2] = {
+				(button_pattern >> 8) & 0x03,
+				button_pattern & 0xff,
+			};
 
-			    esp_ble_gatts_send_indicate(last_if,
-							last_conn_id,
-							led_button_handle_table[IDX_CHAR_BUTTON_VAL],
-							sizeof(notify_data), notify_data, false);
+			vTaskDelay(pdMS_TO_TICKS(item.delay_ms));
+			ESP_LOGI("BUTTON", "[auto push button] delay=%" PRIu32
+				 " ms duration=%d ms pattern=%02x%02x",
+				 item.delay_ms, (press_last - press_start + 1) * 50,
+				 notify_data[0], notify_data[1]);
+			esp_err_t error = esp_ble_gatts_send_indicate(
+				item.gatts_if, item.conn_id,
+				led_button_handle_table[IDX_CHAR_BUTTON_VAL],
+				sizeof(notify_data), notify_data, false);
+			if (error != ESP_OK) {
+				ESP_LOGW("BUTTON", "Auto button send failed: %s",
+					 esp_err_to_name(error));
+			}
 		}
 	}
 }
@@ -1063,7 +1101,7 @@ void app_main()
     //Install UART driver, and get the queue.
     uart_driver_install(EX_UART_NUM, BUF_SIZE * 2, BUF_SIZE * 2, 20, &uart0_queue, 0);
 
-    button_queue = xQueueCreate( 10, sizeof( int ) );
+    button_queue = xQueueCreate(10, sizeof(button_queue_item_t));
 
    //Create a task to handler UART event from ISR
     xTaskCreate(uart_event_task, "uart_event_task", 2048, NULL, 12, NULL);
