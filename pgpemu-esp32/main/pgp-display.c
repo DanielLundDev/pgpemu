@@ -392,13 +392,12 @@ static void draw_confetti(canvas_t *canvas, int frame)
 static void draw_card(canvas_t *canvas, int y, const char *label,
 		      uint32_t value, uint16_t accent)
 {
-	canvas_round_rect(canvas, 12, y, 148, 60, 9, COLOR_CARD_EDGE);
-	canvas_round_rect(canvas, 13, y + 1, 146, 58, 8, COLOR_CARD);
-	canvas_round_rect(canvas, 20, y + 10, 4, 40, 2, accent);
-	canvas_text(canvas, 32, y + 10, label, 1, COLOR_MUTED);
+	canvas_round_rect(canvas, 8, y, 156, 70, 10, accent);
+	canvas_round_rect(canvas, 10, y + 2, 152, 66, 8, COLOR_CARD);
+	canvas_centered_text(canvas, y + 8, label, 2, accent);
 	char value_text[16];
 	snprintf(value_text, sizeof(value_text), "%" PRIu32, value);
-	canvas_text(canvas, 32, y + 27, value_text, 3, COLOR_WHITE);
+	canvas_centered_text(canvas, y + 32, value_text, 4, COLOR_WHITE);
 }
 
 static void render_dashboard(const display_state_t *state)
@@ -431,64 +430,51 @@ static void render_dashboard(const display_state_t *state)
 		canvas_circle(&canvas, 21, 19, 4, COLOR_RED);
 		canvas_text(&canvas, 40, 11, "GO BUDDY", 2, COLOR_WHITE);
 
-		uint16_t status_color = state->connected ? COLOR_GREEN : COLOR_CARD_EDGE;
-		canvas_round_rect(&canvas, 12, 36, 148, 19, 9, status_color);
-		canvas_centered_text(&canvas, 42,
-				     state->connected ? "CONNECTED" : "WAITING FOR GO",
-				     1, state->connected ? COLOR_BLACK : COLOR_MUTED);
-
-		draw_ball(&canvas, 87 + state->ball_offset);
+		draw_ball(&canvas, 69 + state->ball_offset);
 		if (state->confetti_frame >= 0) {
 			draw_confetti(&canvas, state->confetti_frame);
 		}
 
-		const char *toast_text = "READY TO ROLL";
-		uint16_t toast_color = COLOR_MUTED;
+		const char *status_text = "CONNECTED";
+		const char *detail_text = "READY TO ROLL";
+		uint16_t status_color = COLOR_GREEN;
 		switch (state->toast) {
 		case TOAST_WAITING:
-			toast_text = "PAIR ME UP";
+			status_text = "PAIR ME UP";
+			detail_text = "OPEN POKEMON GO";
+			status_color = COLOR_WHITE;
 			break;
 		case TOAST_CAUGHT:
-			toast_text = "NICE CATCH!";
-			toast_color = COLOR_GREEN;
+			status_text = "NICE CATCH!";
+			detail_text = "CONNECTED";
+			status_color = COLOR_GREEN;
 			break;
 		case TOAST_FLED:
-			toast_text = "SO CLOSE";
-			toast_color = COLOR_RED;
+			status_text = "SO CLOSE";
+			detail_text = "CONNECTED";
+			status_color = COLOR_RED;
 			break;
 		case TOAST_SPUN:
-			toast_text = "ITEMS COLLECTED!";
-			toast_color = COLOR_BLUE;
+			status_text = "STOP SPUN!";
+			detail_text = "CONNECTED";
+			status_color = COLOR_BLUE;
 			break;
 		case TOAST_READY:
 		default:
 			break;
 		}
-		canvas_centered_text(&canvas, 116, toast_text, 1, toast_color);
+		canvas_round_rect(&canvas, 8, 103, 156, 43, 10, COLOR_CARD_EDGE);
+		canvas_round_rect(&canvas, 10, 105, 152, 39, 8, COLOR_CARD);
+		canvas_centered_text(&canvas, 109, status_text, 2, status_color);
+		canvas_centered_text(&canvas, 132, detail_text, 1, COLOR_MUTED);
 
-		draw_card(&canvas, 132, "POKEMON CAUGHT", state->caught, COLOR_GREEN);
-		draw_card(&canvas, 198, "POKESTOPS SPUN", state->spun, COLOR_BLUE);
+		draw_card(&canvas, 153, "CAUGHT", state->caught, COLOR_GREEN);
+		draw_card(&canvas, 230, "STOPS SPUN", state->spun, COLOR_BLUE);
 
 		uint64_t total = (uint64_t)state->caught + state->spun;
 		char total_text[24];
-		snprintf(total_text, sizeof(total_text), "%" PRIu64, total);
-		canvas_text(&canvas, 14, 268, "ADVENTURE TOTAL", 1, COLOR_MUTED);
-		canvas_text(&canvas, LCD_WIDTH - 14 - text_width(total_text, 1), 268,
-			    total_text, 1, COLOR_WHITE);
-		canvas_round_rect(&canvas, 14, 282, 144, 8, 4, COLOR_CARD_EDGE);
-		if (total > 0) {
-			int caught_width = (int)(144ULL * state->caught / total);
-			if (state->caught == 0) {
-				canvas_round_rect(&canvas, 14, 282, 144, 8, 4, COLOR_BLUE);
-			} else if (state->spun == 0) {
-				canvas_round_rect(&canvas, 14, 282, 144, 8, 4, COLOR_GREEN);
-			} else {
-				canvas_rect(&canvas, 14, 282, caught_width, 8, COLOR_GREEN);
-				canvas_rect(&canvas, 14 + caught_width, 282,
-					    144 - caught_width, 8, COLOR_BLUE);
-			}
-		}
-		canvas_centered_text(&canvas, 301, "ALL TIME TOTALS", 1, COLOR_MUTED);
+		snprintf(total_text, sizeof(total_text), "TOTAL %" PRIu64, total);
+		canvas_centered_text(&canvas, 308, total_text, 1, COLOR_MUTED);
 
 		esp_err_t error = lcd_flush_stripe(stripe_y, stripe_height);
 		if (error != ESP_OK) {
