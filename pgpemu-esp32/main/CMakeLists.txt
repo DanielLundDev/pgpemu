@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS "pgpemu.c"
          "pgp-cert.c"
+         "pgp-auto-mode.c"
          "pgp-display.c"
          "pgp-events.c"
          "pgp-mood-light.c"

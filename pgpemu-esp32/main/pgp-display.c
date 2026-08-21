@@ -58,6 +58,7 @@ typedef enum {
 	DISPLAY_EVENT_CAUGHT,
 	DISPLAY_EVENT_FLED,
 	DISPLAY_EVENT_SPUN,
+	DISPLAY_EVENT_AUTO_MODE,
 } display_event_t;
 
 typedef enum {
@@ -72,10 +73,16 @@ typedef struct {
 	uint32_t caught;
 	uint32_t spun;
 	bool connected;
+	pgp_auto_mode_t auto_mode;
 	toast_t toast;
 	int ball_offset;
 	int confetti_frame;
 } display_state_t;
+
+typedef struct {
+	display_event_t type;
+	pgp_auto_mode_t auto_mode;
+} display_event_item_t;
 
 typedef struct {
 	int stripe_y;
@@ -436,27 +443,23 @@ static void render_dashboard(const display_state_t *state)
 		}
 
 		const char *status_text = "CONNECTED";
-		const char *detail_text = "READY TO ROLL";
+		const char *detail_text = pgp_auto_mode_label(state->auto_mode);
 		uint16_t status_color = COLOR_GREEN;
 		switch (state->toast) {
 		case TOAST_WAITING:
 			status_text = "PAIR ME UP";
-			detail_text = "OPEN POKEMON GO";
 			status_color = COLOR_WHITE;
 			break;
 		case TOAST_CAUGHT:
 			status_text = "NICE CATCH!";
-			detail_text = "CONNECTED";
 			status_color = COLOR_GREEN;
 			break;
 		case TOAST_FLED:
 			status_text = "SO CLOSE";
-			detail_text = "CONNECTED";
 			status_color = COLOR_RED;
 			break;
 		case TOAST_SPUN:
 			status_text = "STOP SPUN!";
-			detail_text = "CONNECTED";
 			status_color = COLOR_BLUE;
 			break;
 		case TOAST_READY:
@@ -508,6 +511,7 @@ static void display_task(void *context)
 {
 	(void)context;
 	display_state_t state = {
+		.auto_mode = PGP_AUTO_MODE_BOTH,
 		.toast = TOAST_WAITING,
 		.confetti_frame = -1,
 	};
@@ -533,9 +537,9 @@ static void display_task(void *context)
 	bool dirty = false;
 	int64_t last_save = esp_timer_get_time();
 	for (;;) {
-		display_event_t event;
+		display_event_item_t event;
 		if (xQueueReceive(s_event_queue, &event, pdMS_TO_TICKS(1000)) == pdTRUE) {
-			switch (event) {
+			switch (event.type) {
 			case DISPLAY_EVENT_CONNECTED:
 				state.connected = true;
 				state.toast = TOAST_READY;
@@ -583,6 +587,10 @@ static void display_task(void *context)
 				state.confetti_frame = -1;
 				render_dashboard(&state);
 				break;
+			case DISPLAY_EVENT_AUTO_MODE:
+				state.auto_mode = event.auto_mode;
+				render_dashboard(&state);
+				break;
 			}
 		}
 
@@ -597,14 +605,17 @@ static void display_task(void *context)
 
 static void queue_event(display_event_t event)
 {
-	if (s_event_queue != NULL && xQueueSend(s_event_queue, &event, 0) != pdTRUE) {
+	display_event_item_t item = {
+		.type = event,
+	};
+	if (s_event_queue != NULL && xQueueSend(s_event_queue, &item, 0) != pdTRUE) {
 		ESP_LOGW(TAG, "display event queue full");
 	}
 }
 
 bool pgp_display_init(void)
 {
-	s_event_queue = xQueueCreate(8, sizeof(display_event_t));
+	s_event_queue = xQueueCreate(8, sizeof(display_event_item_t));
 	if (s_event_queue == NULL) {
 		return false;
 	}
@@ -619,6 +630,17 @@ bool pgp_display_init(void)
 void pgp_display_set_connected(bool connected)
 {
 	queue_event(connected ? DISPLAY_EVENT_CONNECTED : DISPLAY_EVENT_DISCONNECTED);
+}
+
+void pgp_display_set_auto_mode(pgp_auto_mode_t mode)
+{
+	display_event_item_t item = {
+		.type = DISPLAY_EVENT_AUTO_MODE,
+		.auto_mode = mode,
+	};
+	if (s_event_queue != NULL && xQueueSend(s_event_queue, &item, 0) != pdTRUE) {
+		ESP_LOGW(TAG, "display event queue full");
+	}
 }
 
 void pgp_display_pokemon_caught(void)

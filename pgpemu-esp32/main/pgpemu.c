@@ -2,16 +2,20 @@
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
+#include "driver/gpio.h"
 #include "driver/uart.h"
 
 #include <inttypes.h>
 
 #define EX_UART_NUM UART_NUM_0
+#define MODE_BUTTON_GPIO GPIO_NUM_9
+#define MODE_BUTTON_DEBOUNCE_MS 40
 
 
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_log_buffer.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_bt.h"
 #include "esp_mac.h"
@@ -20,6 +24,7 @@
 #include "esp_gatts_api.h"
 #include "esp_bt_main.h"
 #include "pgpemu.h"
+#include "pgp-auto-mode.h"
 #include "pgp-cert.h"
 #include "pgp-display.h"
 #include "pgp-events.h"
@@ -86,9 +91,11 @@ typedef struct {
 	esp_gatt_if_t gatts_if;
 	uint16_t conn_id;
 	uint32_t delay_ms;
+	pgp_led_event_t event;
 } button_queue_item_t;
 
 static QueueHandle_t button_queue;
+static volatile pgp_auto_mode_t s_auto_mode = PGP_AUTO_MODE_BOTH;
 
 static prepare_type_env_t prepare_write_env;
 
@@ -640,10 +647,17 @@ void handle_led_notify_from_app(esp_gatt_if_t gatts_if, uint16_t conn_id,
 		pgp_led_event_t event = pgp_parse_led_event(buffer, length);
 		if (event == PGP_LED_EVENT_POKEMON_ENCOUNTER ||
 		    event == PGP_LED_EVENT_POKESTOP_ENCOUNTER) {
+			pgp_auto_mode_t mode = s_auto_mode;
+			if (!pgp_auto_mode_allows_event(mode, event)) {
+				ESP_LOGI(GATTS_TABLE_TAG, "Ignoring encounter in %s mode",
+					 pgp_auto_mode_label(mode));
+				return;
+			}
 			button_queue_item_t item = {
 				.gatts_if = gatts_if,
 				.conn_id = conn_id,
 				.delay_ms = 1000 + esp_random() % 1501,
+				.event = event,
 			};
 			ESP_LOGI(GATTS_TABLE_TAG, "Queueing auto button in %" PRIu32 " ms",
 				 item.delay_ms);
@@ -933,6 +947,103 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
 }
 
 
+static pgp_auto_mode_t load_auto_mode(void)
+{
+	nvs_handle_t handle;
+	uint8_t saved_mode;
+	if (nvs_open("go_config", NVS_READONLY, &handle) != ESP_OK) {
+		return PGP_AUTO_MODE_BOTH;
+	}
+	esp_err_t error = nvs_get_u8(handle, "auto_mode", &saved_mode);
+	nvs_close(handle);
+	if (error != ESP_OK || !pgp_auto_mode_is_valid((pgp_auto_mode_t)saved_mode)) {
+		return PGP_AUTO_MODE_BOTH;
+	}
+	return (pgp_auto_mode_t)saved_mode;
+}
+
+static void save_auto_mode(pgp_auto_mode_t mode)
+{
+	nvs_handle_t handle = 0;
+	esp_err_t error = nvs_open("go_config", NVS_READWRITE, &handle);
+	if (error == ESP_OK) {
+		error = nvs_set_u8(handle, "auto_mode", (uint8_t)mode);
+	}
+	if (error == ESP_OK) {
+		error = nvs_commit(handle);
+	}
+	if (handle) {
+		nvs_close(handle);
+	}
+	if (error != ESP_OK) {
+		ESP_LOGW("MODE_BUTTON", "Could not save auto mode: %s",
+			 esp_err_to_name(error));
+	}
+}
+
+static void set_auto_mode(pgp_auto_mode_t mode)
+{
+	if (!pgp_auto_mode_is_valid(mode)) {
+		return;
+	}
+	s_auto_mode = mode;
+	save_auto_mode(mode);
+	pgp_display_set_auto_mode(mode);
+	ESP_LOGI("MODE_BUTTON", "Auto mode: %s", pgp_auto_mode_label(mode));
+}
+
+static void mode_button_task(void *context)
+{
+	(void)context;
+	gpio_config_t button_config = {
+		.pin_bit_mask = 1ULL << MODE_BUTTON_GPIO,
+		.mode = GPIO_MODE_INPUT,
+		.pull_up_en = GPIO_PULLUP_ENABLE,
+		.pull_down_en = GPIO_PULLDOWN_DISABLE,
+		.intr_type = GPIO_INTR_DISABLE,
+	};
+	esp_err_t error = gpio_config(&button_config);
+	if (error != ESP_OK) {
+		ESP_LOGE("MODE_BUTTON", "Could not configure button: %s",
+			 esp_err_to_name(error));
+		vTaskDelete(NULL);
+		return;
+	}
+
+	int last_sample = gpio_get_level(MODE_BUTTON_GPIO);
+	int stable_level = last_sample;
+	TickType_t changed_at = xTaskGetTickCount();
+	bool armed = stable_level != 0;
+	bool pressed = false;
+	for (;;) {
+		vTaskDelay(pdMS_TO_TICKS(10));
+		int sample = gpio_get_level(MODE_BUTTON_GPIO);
+		TickType_t now = xTaskGetTickCount();
+		if (sample != last_sample) {
+			last_sample = sample;
+			changed_at = now;
+		}
+		if (sample == stable_level ||
+		    now - changed_at < pdMS_TO_TICKS(MODE_BUTTON_DEBOUNCE_MS)) {
+			continue;
+		}
+
+		stable_level = sample;
+		if (stable_level == 0) {
+			if (armed) {
+				pressed = true;
+			}
+		} else {
+			if (pressed) {
+				set_auto_mode(pgp_auto_mode_next(s_auto_mode));
+			}
+			pressed = false;
+			armed = true;
+		}
+	}
+}
+
+
 
 
 static void auto_button_task(void *pvParameters)
@@ -957,6 +1068,12 @@ static void auto_button_task(void *pvParameters)
 			};
 
 			vTaskDelay(pdMS_TO_TICKS(item.delay_ms));
+			pgp_auto_mode_t mode = s_auto_mode;
+			if (!pgp_auto_mode_allows_event(mode, item.event)) {
+				ESP_LOGI("BUTTON", "[auto push skipped] mode=%s",
+					 pgp_auto_mode_label(mode));
+				continue;
+			}
 			ESP_LOGI("BUTTON", "[auto push button] delay=%" PRIu32
 				 " ms duration=%d ms pattern=%02x%02x",
 				 item.delay_ms, (press_last - press_start + 1) * 50,
@@ -1075,9 +1192,16 @@ void app_main()
     }
     ESP_ERROR_CHECK( ret );
 
+	s_auto_mode = load_auto_mode();
     if (!pgp_display_init()) {
 	    ESP_LOGE(GATTS_TABLE_TAG, "Failed to start display task");
-    }
+	} else {
+		pgp_display_set_auto_mode(s_auto_mode);
+	}
+	ESP_LOGI("MODE_BUTTON", "Auto mode: %s", pgp_auto_mode_label(s_auto_mode));
+	if (xTaskCreate(mode_button_task, "mode_button", 2048, NULL, 8, NULL) != pdPASS) {
+		ESP_LOGE(GATTS_TABLE_TAG, "Failed to start mode button task");
+	}
 	if (!pgp_mood_light_init()) {
 		ESP_LOGE(GATTS_TABLE_TAG, "Failed to start mood light task");
 	}
