@@ -1062,7 +1062,7 @@ static void mode_button_task(void *context)
 				pressed = true;
 			}
 		} else {
-			if (pressed) {
+			if (pressed && !pgp_display_wake()) {
 				set_auto_mode(pgp_auto_mode_next(s_auto_mode));
 			}
 			pressed = false;

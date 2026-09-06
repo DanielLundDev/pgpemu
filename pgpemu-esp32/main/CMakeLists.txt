@@ -12,5 +12,5 @@ idf_component_register(
          "secrets.c"
     INCLUDE_DIRS "."
     REQUIRES bt nvs_flash mbedtls esp_lcd esp_timer
-    PRIV_REQUIRES esp_driver_gpio esp_driver_rmt esp_driver_spi esp_driver_uart
+    PRIV_REQUIRES esp_driver_gpio esp_driver_ledc esp_driver_rmt esp_driver_spi esp_driver_uart
 )
