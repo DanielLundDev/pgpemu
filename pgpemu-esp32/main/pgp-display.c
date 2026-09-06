@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "driver/spi_master.h"
 #include "esp_attr.h"
 #include "esp_check.h"
@@ -32,6 +33,8 @@
 #define LCD_PIN_DC 15
 #define LCD_PIN_RST 21
 #define LCD_PIN_BACKLIGHT 22
+#define LCD_BACKLIGHT_DUTY 256 /* 25% of the 10-bit PWM period. */
+#define LCD_TIMEOUT_US (15LL * 1000 * 1000)
 
 #define LCD_CMD_CASET 0x2a
 #define LCD_CMD_RASET 0x2b
@@ -59,6 +62,7 @@ typedef enum {
 	DISPLAY_EVENT_FLED,
 	DISPLAY_EVENT_SPUN,
 	DISPLAY_EVENT_AUTO_MODE,
+	DISPLAY_EVENT_WAKE,
 } display_event_t;
 
 typedef enum {
@@ -73,6 +77,7 @@ typedef struct {
 	uint32_t caught;
 	uint32_t spun;
 	bool connected;
+	bool awake;
 	pgp_auto_mode_t auto_mode;
 	toast_t toast;
 	int ball_offset;
@@ -95,6 +100,28 @@ static QueueHandle_t s_event_queue;
 static SemaphoreHandle_t s_flush_done;
 static esp_lcd_panel_io_handle_t s_lcd_io;
 static DMA_ATTR uint16_t s_line_buffer[LCD_WIDTH * LCD_STRIPE_HEIGHT];
+static portMUX_TYPE s_backlight_lock = portMUX_INITIALIZER_UNLOCKED;
+static int64_t s_awake_until;
+static bool s_display_ready;
+
+static bool display_should_be_awake(void)
+{
+	int64_t now = esp_timer_get_time();
+	portENTER_CRITICAL(&s_backlight_lock);
+	bool awake = now < s_awake_until;
+	portEXIT_CRITICAL(&s_backlight_lock);
+	return awake;
+}
+
+static esp_err_t set_backlight(bool on)
+{
+	if (!on) {
+		return ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+	}
+	ESP_RETURN_ON_ERROR(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0,
+					LCD_BACKLIGHT_DUTY), TAG, "set backlight brightness");
+	return ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+}
 
 static uint16_t rgb565(uint8_t red, uint8_t green, uint8_t blue)
 {
@@ -134,6 +161,22 @@ static esp_err_t lcd_init(void)
 	};
 	ESP_RETURN_ON_ERROR(gpio_config(&output_config), TAG, "configure LCD control pins");
 	gpio_set_level(LCD_PIN_BACKLIGHT, 0);
+	ledc_timer_config_t backlight_timer = {
+		.speed_mode = LEDC_LOW_SPEED_MODE,
+		.duty_resolution = LEDC_TIMER_10_BIT,
+		.timer_num = LEDC_TIMER_0,
+		.freq_hz = 5000,
+		.clk_cfg = LEDC_USE_XTAL_CLK,
+	};
+	ESP_RETURN_ON_ERROR(ledc_timer_config(&backlight_timer), TAG, "configure backlight timer");
+	ledc_channel_config_t backlight_channel = {
+		.gpio_num = LCD_PIN_BACKLIGHT,
+		.speed_mode = LEDC_LOW_SPEED_MODE,
+		.channel = LEDC_CHANNEL_0,
+		.timer_sel = LEDC_TIMER_0,
+		.duty = 0,
+	};
+	ESP_RETURN_ON_ERROR(ledc_channel_config(&backlight_channel), TAG, "configure backlight PWM");
 
 	spi_bus_config_t bus_config = {
 		.mosi_io_num = LCD_PIN_MOSI,
@@ -409,6 +452,9 @@ static void draw_card(canvas_t *canvas, int y, const char *label,
 
 static void render_dashboard(const display_state_t *state)
 {
+	if (!state->awake) {
+		return;
+	}
 	for (int stripe_y = 0; stripe_y < LCD_HEIGHT; stripe_y += LCD_STRIPE_HEIGHT) {
 		int stripe_height = LCD_HEIGHT - stripe_y;
 		if (stripe_height > LCD_STRIPE_HEIGHT) {
@@ -513,6 +559,7 @@ static void display_task(void *context)
 	(void)context;
 	display_state_t state = {
 		.auto_mode = PGP_AUTO_MODE_BOTH,
+		.awake = true,
 		.toast = TOAST_WAITING,
 		.confetti_frame = -1,
 	};
@@ -523,6 +570,10 @@ static void display_task(void *context)
 	}
 
 	esp_err_t error = lcd_init();
+	if (error == ESP_OK) {
+		render_dashboard(&state);
+		error = set_backlight(true);
+	}
 	if (error != ESP_OK) {
 		ESP_LOGE(TAG, "display initialization failed: %s", esp_err_to_name(error));
 		if (nvs_ready) nvs_close(stats_handle);
@@ -530,8 +581,11 @@ static void display_task(void *context)
 		return;
 	}
 
-	render_dashboard(&state);
-	gpio_set_level(LCD_PIN_BACKLIGHT, 1);
+	int64_t now = esp_timer_get_time();
+	portENTER_CRITICAL(&s_backlight_lock);
+	s_awake_until = now + LCD_TIMEOUT_US;
+	s_display_ready = true;
+	portEXIT_CRITICAL(&s_backlight_lock);
 	ESP_LOGI(TAG, "dashboard ready (%" PRIu32 " caught, %" PRIu32 " stops spun)",
 		 state.caught, state.spun);
 
@@ -539,7 +593,22 @@ static void display_task(void *context)
 	int64_t last_save = esp_timer_get_time();
 	for (;;) {
 		display_event_item_t event;
-		if (xQueueReceive(s_event_queue, &event, pdMS_TO_TICKS(1000)) == pdTRUE) {
+		bool received = xQueueReceive(s_event_queue, &event, pdMS_TO_TICKS(1000)) == pdTRUE;
+		bool awake = display_should_be_awake();
+		if (awake != state.awake) {
+			state.awake = awake;
+			if (awake) {
+				render_dashboard(&state);
+			}
+			error = set_backlight(awake);
+			if (error == ESP_OK) {
+				ESP_LOGI(TAG, "backlight %s", awake ? "on at 25%" : "off after inactivity");
+			} else {
+				state.awake = !awake; /* Retry on the next iteration. */
+				ESP_LOGW(TAG, "backlight update failed: %s", esp_err_to_name(error));
+			}
+		}
+		if (received) {
 			switch (event.type) {
 			case DISPLAY_EVENT_CONNECTED:
 				state.connected = true;
@@ -562,7 +631,7 @@ static void display_task(void *context)
 				state.toast = TOAST_SPUN;
 				state.confetti_frame = -1;
 				static const int hop[] = {0, -7, -11, -5, 0};
-				for (size_t i = 0; i < sizeof(hop) / sizeof(hop[0]); i++) {
+				for (size_t i = 0; state.awake && i < sizeof(hop) / sizeof(hop[0]); i++) {
 					state.ball_offset = hop[i];
 					render_dashboard(&state);
 					vTaskDelay(pdMS_TO_TICKS(45));
@@ -574,7 +643,7 @@ static void display_task(void *context)
 				state.caught++;
 				state.toast = TOAST_CAUGHT;
 				state.ball_offset = 0;
-				for (int frame = 0; frame < 3; frame++) {
+				for (int frame = 0; state.awake && frame < 3; frame++) {
 					state.confetti_frame = frame;
 					render_dashboard(&state);
 					vTaskDelay(pdMS_TO_TICKS(80));
@@ -590,6 +659,9 @@ static void display_task(void *context)
 			case DISPLAY_EVENT_AUTO_MODE:
 				state.auto_mode = event.auto_mode;
 				render_dashboard(&state);
+				break;
+			case DISPLAY_EVENT_WAKE:
+				/* The shared deadline also wakes the display if its queue was full. */
 				break;
 			}
 		}
@@ -624,6 +696,21 @@ bool pgp_display_init(void)
 		return false;
 	}
 	return true;
+}
+
+bool pgp_display_wake(void)
+{
+	int64_t now = esp_timer_get_time();
+	portENTER_CRITICAL(&s_backlight_lock);
+	if (!s_display_ready) {
+		portEXIT_CRITICAL(&s_backlight_lock);
+		return false;
+	}
+	bool was_asleep = now >= s_awake_until;
+	s_awake_until = now + LCD_TIMEOUT_US;
+	portEXIT_CRITICAL(&s_backlight_lock);
+	queue_event(DISPLAY_EVENT_WAKE);
+	return was_asleep;
 }
 
 void pgp_display_set_connected(bool connected)
