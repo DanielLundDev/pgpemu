@@ -5,8 +5,6 @@
 #include "pgp-auto-mode.h"
 
 bool pgp_display_init(void);
-/* Refresh the timeout; return true when this press only wakes the screen. */
-bool pgp_display_wake(void);
 void pgp_display_set_connected(bool connected);
 void pgp_display_set_auto_mode(pgp_auto_mode_t mode);
 void pgp_display_pokemon_caught(void);
