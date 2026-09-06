@@ -3,7 +3,6 @@
 ## Project Structure & Module Organization
 - `pgpemu-esp32/`: ESP-IDF firmware. Core sources live in `pgpemu-esp32/main/` (`pgpemu.c`, `pgp-cert.c`, `aes.c`, `secrets.c`).
 - `firmware-tools/`: Python scripts for decrypting/patching Pokemon GO Plus firmware (`decrypt.py`, `patch.py`) with usage notes in `firmware-tools/README.md`.
-- `schmatic/`: KiCad design files for the hardware.
 - Root files include project docs (`README.md`) and local key exports; treat any device data as sensitive.
 
 ## Build, Test, and Development Commands
