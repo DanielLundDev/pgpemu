@@ -36,12 +36,19 @@ static esp_err_t set_rgb(uint8_t red, uint8_t green, uint8_t blue)
 		.loop_count = 0,
 	};
 
-	esp_err_t error = rmt_transmit(s_tx_channel, s_bytes_encoder, pixel,
+	/* The channel holds a CPU power lock while enabled, even with a dark LED. */
+	esp_err_t error = rmt_enable(s_tx_channel);
+	if (error != ESP_OK) {
+		return error;
+	}
+	error = rmt_transmit(s_tx_channel, s_bytes_encoder, pixel,
 					 sizeof(pixel), &transmit_config);
 	if (error == ESP_OK) {
-		error = rmt_tx_wait_all_done(s_tx_channel, pdMS_TO_TICKS(100));
+		error = rmt_tx_wait_all_done(s_tx_channel, 100);
 	}
-	return error;
+	/* Also stop the channel after a failed or timed-out transmission. */
+	esp_err_t disable_error = rmt_disable(s_tx_channel);
+	return error != ESP_OK ? error : disable_error;
 }
 
 static void mood_light_task(void *context)
@@ -79,9 +86,6 @@ static void mood_light_task(void *context)
 
 static void release_resources(void)
 {
-	if (s_tx_channel != NULL) {
-		rmt_disable(s_tx_channel);
-	}
 	if (s_bytes_encoder != NULL) {
 		rmt_del_encoder(s_bytes_encoder);
 		s_bytes_encoder = NULL;
@@ -133,7 +137,6 @@ bool pgp_mood_light_init(void)
 		.flags.msb_first = 1,
 	};
 	error = rmt_new_bytes_encoder(&encoder_config, &s_bytes_encoder);
-	if (error == ESP_OK) error = rmt_enable(s_tx_channel);
 	if (error == ESP_OK) error = set_rgb(0, 0, 0);
 	if (error != ESP_OK) {
 		ESP_LOGE(TAG, "could not initialize mood light: %s", esp_err_to_name(error));
