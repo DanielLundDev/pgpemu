@@ -497,7 +497,7 @@ static void load_stats(nvs_handle_t handle, display_state_t *state)
 	}
 }
 
-static void save_stats(nvs_handle_t handle, const display_state_t *state)
+static bool save_stats(nvs_handle_t handle, const display_state_t *state)
 {
 	esp_err_t error = nvs_set_u32(handle, "caught", state->caught);
 	if (error == ESP_OK) error = nvs_set_u32(handle, "spun", state->spun);
@@ -505,6 +505,7 @@ static void save_stats(nvs_handle_t handle, const display_state_t *state)
 	if (error != ESP_OK) {
 		ESP_LOGW(TAG, "could not save counters: %s", esp_err_to_name(error));
 	}
+	return error == ESP_OK;
 }
 
 static void display_task(void *context)
@@ -552,8 +553,7 @@ static void display_task(void *context)
 				state.confetti_frame = -1;
 				render_dashboard(&state);
 				if (dirty && nvs_ready) {
-					save_stats(stats_handle, &state);
-					dirty = false;
+					dirty = !save_stats(stats_handle, &state);
 					last_save = esp_timer_get_time();
 				}
 				break;
@@ -596,8 +596,7 @@ static void display_task(void *context)
 
 		int64_t now = esp_timer_get_time();
 		if (dirty && nvs_ready && now - last_save >= 60LL * 1000 * 1000) {
-			save_stats(stats_handle, &state);
-			dirty = false;
+			dirty = !save_stats(stats_handle, &state);
 			last_save = now;
 		}
 	}

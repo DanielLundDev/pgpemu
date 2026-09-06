@@ -91,11 +91,30 @@ typedef struct {
 	esp_gatt_if_t gatts_if;
 	uint16_t conn_id;
 	uint32_t delay_ms;
-	pgp_led_event_t event;
+	uint32_t generation;
 } button_queue_item_t;
 
 static QueueHandle_t button_queue;
 static volatile pgp_auto_mode_t s_auto_mode = PGP_AUTO_MODE_BOTH;
+static portMUX_TYPE s_button_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_button_generation;
+static bool s_button_connected;
+
+static void set_button_connected(bool connected)
+{
+	portENTER_CRITICAL(&s_button_lock);
+	s_button_connected = connected;
+	s_button_generation++;
+	portEXIT_CRITICAL(&s_button_lock);
+}
+
+static bool button_request_is_current(const button_queue_item_t *item)
+{
+	portENTER_CRITICAL(&s_button_lock);
+	bool current = s_button_connected && item->generation == s_button_generation;
+	portEXIT_CRITICAL(&s_button_lock);
+	return current;
+}
 
 static prepare_type_env_t prepare_write_env;
 
@@ -647,8 +666,12 @@ void handle_led_notify_from_app(esp_gatt_if_t gatts_if, uint16_t conn_id,
 		pgp_led_event_t event = pgp_parse_led_event(buffer, length);
 		if (event == PGP_LED_EVENT_POKEMON_ENCOUNTER ||
 		    event == PGP_LED_EVENT_POKESTOP_ENCOUNTER) {
+			portENTER_CRITICAL(&s_button_lock);
 			pgp_auto_mode_t mode = s_auto_mode;
-			if (!pgp_auto_mode_allows_event(mode, event)) {
+			uint32_t generation = s_button_generation;
+			bool connected = s_button_connected;
+			portEXIT_CRITICAL(&s_button_lock);
+			if (!connected || !pgp_auto_mode_allows_event(mode, event)) {
 				ESP_LOGI(GATTS_TABLE_TAG, "Ignoring encounter in %s mode",
 					 pgp_auto_mode_label(mode));
 				return;
@@ -657,7 +680,7 @@ void handle_led_notify_from_app(esp_gatt_if_t gatts_if, uint16_t conn_id,
 				.gatts_if = gatts_if,
 				.conn_id = conn_id,
 				.delay_ms = 1000 + esp_random() % 1501,
-				.event = event,
+				.generation = generation,
 			};
 			ESP_LOGI(GATTS_TABLE_TAG, "Queueing auto button in %" PRIu32 " ms",
 				 item.delay_ms);
@@ -852,6 +875,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             esp_ble_gap_update_conn_params(&conn_params);
 	    last_conn_id = param->connect.conn_id;
 	    last_if = gatts_if;
+	    set_button_connected(true);
 	    pgp_display_set_connected(true);
 	    
             esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
@@ -859,6 +883,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
         case ESP_GATTS_DISCONNECT_EVT:
             ESP_LOGI(GATTS_TABLE_TAG, "ESP_GATTS_DISCONNECT_EVT, reason = %d", param->disconnect.reason);
 	    cert_state = 0;
+	    set_button_connected(false);
 	    pgp_display_set_connected(false);
 
             esp_ble_gap_start_advertising(&adv_params);
@@ -986,7 +1011,10 @@ static void set_auto_mode(pgp_auto_mode_t mode)
 	if (!pgp_auto_mode_is_valid(mode)) {
 		return;
 	}
+	portENTER_CRITICAL(&s_button_lock);
 	s_auto_mode = mode;
+	s_button_generation++;
+	portEXIT_CRITICAL(&s_button_lock);
 	save_auto_mode(mode);
 	pgp_display_set_auto_mode(mode);
 	ESP_LOGI("MODE_BUTTON", "Auto mode: %s", pgp_auto_mode_label(mode));
@@ -1052,6 +1080,10 @@ static void auto_button_task(void *pvParameters)
 	while (1) {
 		button_queue_item_t item;
 		if (xQueueReceive(button_queue, &item, portMAX_DELAY)) {
+			/* Drain canceled requests without waiting out each old delay. */
+			if (!button_request_is_current(&item)) {
+				continue;
+			}
 			int press_start = esp_random() % 6;
 			int press_last = press_start + 4 + esp_random() % (10 - press_start - 4);
 			uint16_t button_pattern = 0;
@@ -1068,10 +1100,8 @@ static void auto_button_task(void *pvParameters)
 			};
 
 			vTaskDelay(pdMS_TO_TICKS(item.delay_ms));
-			pgp_auto_mode_t mode = s_auto_mode;
-			if (!pgp_auto_mode_allows_event(mode, item.event)) {
-				ESP_LOGI("BUTTON", "[auto push skipped] mode=%s",
-					 pgp_auto_mode_label(mode));
+			if (!button_request_is_current(&item)) {
+				ESP_LOGI("BUTTON", "[auto push skipped] request canceled");
 				continue;
 			}
 			ESP_LOGI("BUTTON", "[auto push button] delay=%" PRIu32
